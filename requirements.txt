@@ -1,0 +1,15 @@
+numpy>=2.0
+sounddevice>=0.5
+soundfile>=0.13
+sherpa-onnx>=1.12
+faster-whisper>=1.2
+pystray>=0.19
+Pillow>=11
+comtypes>=1.4
+pywin32>=310
+psutil>=7
+requests>=2.32
+websocket-client>=1.8
+pyaudiowpatch>=0.2
+opencc-python-reimplemented>=0.1
+pyinstaller>=6.16

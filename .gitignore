@@ -1,0 +1,12 @@
+.venv/
+.buildvenv/
+build/
+dist*/
+__pycache__/
+*.py[cod]
+*.spec
+.env
+data-dir.txt
+.test-data/
+.test-tmp/
+tools/llama/
