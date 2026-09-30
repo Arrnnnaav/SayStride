@@ -1,6 +1,7 @@
 """Standalone Windows tray app and settings window."""
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import re
@@ -473,6 +474,10 @@ class App:
     def _settings(self, tabs):
         page = ttk.Frame(tabs, padding=10)
         tabs.add(page, text="Settings")
+        diagnostics_row = ttk.Frame(page)
+        diagnostics_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(diagnostics_row, text="Troubleshooting").pack(side="left")
+        ttk.Button(diagnostics_row, text="View dictation diagnostics", command=self._show_diagnostics).pack(side="right")
         for key, label in (("keep_clips", "Keep dictation clips for evaluation"),
                            ("overlay", "Show floating listening indicator"),
                            ("field_context", "Read text around the cursor when available"),
@@ -520,6 +525,57 @@ class App:
         picker = ttk.Combobox(row2, textvariable=mic, values=["Default"] + devices, width=55, state="readonly")
         picker.pack(side="left", padx=6)
         picker.bind("<<ComboboxSelected>>", lambda _: self._set_mic(mic.get()))
+
+    def _show_diagnostics(self):
+        rows = self.store.diagnostics()
+        window = tk.Toplevel(self.root)
+        window.title("SayStride diagnostics")
+        window.geometry("940x430")
+        window.minsize(720, 300)
+        page = ttk.Frame(window, padding=10)
+        page.pack(fill="both", expand=True)
+        failures = sum(bool(row.get("error")) or row.get("insertion") in {"clipboard_fallback", "insertion_failed"}
+                       for row in rows)
+        ttk.Label(page, text=f"Most recent {len(rows)} sessions · {failures} need attention").pack(anchor="w", pady=(0, 8))
+        columns = ("date", "provider", "app", "duration", "first_text", "first_written", "asr", "final", "insertion", "issue")
+        table = ttk.Treeview(page, columns=columns, show="headings", height=13)
+        labels = ("Date", "Provider", "Target app", "Audio (s)", "First text (ms)",
+                  "First inserted (ms)", "ASR after stop (ms)", "Final (ms)", "Insertion", "Issue")
+        widths = (130, 80, 110, 60, 85, 100, 110, 75, 105, 100)
+        for column, label, width in zip(columns, labels, widths):
+            table.heading(column, text=label)
+            table.column(column, width=width, minwidth=65, stretch=column in {"app", "issue"})
+        table.tag_configure("failed", background="#ffe5e5")
+        table.tag_configure("recovered", background="#fff3cd")
+        for row in rows:
+            insertion = row.get("insertion", "—")
+            failed = bool(row.get("error")) or insertion == "insertion_failed"
+            recovered = insertion == "clipboard_fallback"
+            issue = row.get("error") or row.get("failure_stage") or "—"
+            values = (row.get("date", "")[:19].replace("T", " "), row.get("provider", "—"),
+                      row.get("app", "—"), row.get("recording_seconds", "—"), row.get("first_text_ms", "—"),
+                      row.get("first_written_ms", "—"), row.get("asr_after_stop_ms", "—"),
+                      row.get("final_after_stop_ms", "—"), insertion, issue)
+            table.insert("", "end", values=values,
+                         tags=("failed",) if failed else (("recovered",) if recovered else ()))
+        table_scroll = ttk.Scrollbar(page, orient="horizontal", command=table.xview)
+        table.configure(xscrollcommand=table_scroll.set)
+        table_scroll.pack(side="bottom", fill="x")
+        table.pack(side="top", fill="both", expand=True)
+        controls = ttk.Frame(page)
+        controls.pack(fill="x", pady=(8, 0))
+        ttk.Button(controls, text="Copy privacy-safe report", command=lambda: self._copy_diagnostics(rows)).pack(side="left")
+        ttk.Label(controls, text="Report excludes transcripts and audio").pack(side="left", padx=10)
+
+    def _copy_diagnostics(self, rows):
+        report = json.dumps({"app": "SayStride for Windows", "sessions": rows}, ensure_ascii=False, indent=2)
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(report)
+            self.root.update_idletasks()
+            self.status.set("Privacy-safe diagnostics copied to clipboard")
+        except tk.TclError:
+            self.status.set("Could not copy diagnostics to clipboard")
 
     def _set_mic(self, value):
         self.recorder.close()
@@ -576,6 +632,11 @@ class App:
                 elif kind == "level": self._waveform(value)
                 elif kind == "result": self._result(*value)
                 elif kind == "error": self.status.set(value); self._pill(value); self.root.after(4000, self.pill.withdraw)
+                elif kind == "diagnostic":
+                    try:
+                        self.store.record_diagnostic(value)
+                    except OSError:
+                        LOG.warning("Could not save dictation diagnostic", exc_info=True)
                 elif kind == "hotkey_error": self.status.set(value)
                 elif kind == "context":
                     target, before, after = value
@@ -661,6 +722,15 @@ class App:
                     self.live_thread = threading.Thread(target=self._live_loop, daemon=True)
                     self.live_thread.start()
             except Exception as exc:
+                self.events.put(("diagnostic", {
+                    "provider": "local",
+                    "requested_provider": self.config.get("dictation_provider", "local"),
+                    "app": self.target_app,
+                    "recording_seconds": 0,
+                    "insertion": "not_attempted",
+                    "failure_stage": "microphone_start",
+                    "error": type(exc).__name__,
+                }))
                 self.events.put(("error", f"Microphone could not start: {exc}"))
                 self.events.put(("result", (None, None, None)))
         threading.Thread(target=start, daemon=True).start()
@@ -772,17 +842,20 @@ class App:
         self.live_stop.set()
         self._pill("Transcribing…")
         def worker():
+            provider = "local"
+            stage = "recording"
+            seconds = 0.0
             try:
                 audio = self.recorder.stop()
+                seconds = len(audio) / 16000
                 with self.cloud_lock:
                     self.cloud_buffer = None
                 if self.live_thread and self.live_thread is not threading.current_thread():
                     self.live_thread.join(timeout=5)
-                seconds = len(audio) / 16000
                 if seconds < .2 or float(np.max(np.abs(audio))) < 1e-5:
                     raise ValueError("Microphone gave silence")
                 raw = ""
-                provider = "local"
+                stage = "transcription"
                 if self.deepgram is not None:
                     try:
                         raw = self.deepgram.finish()
@@ -797,6 +870,7 @@ class App:
                 asr_at = time.monotonic()
                 if not raw:
                     raise ValueError("No speech was recognized")
+                stage = "cleanup"
                 examples = {tone: self.store.examples(tone) for tone in self.config["tones"]}
                 final = self.polisher.polish(raw, self.tone, examples, window=self.target_title,
                                              before=self.before, after=self.after, seconds=seconds)
@@ -815,6 +889,17 @@ class App:
                            "live_rewrites": self.live_rewrites}
                 self.events.put(("result", (raw, final, (seconds, clip, metrics))))
             except Exception as exc:
+                self.events.put(("diagnostic", {
+                    "provider": provider,
+                    "requested_provider": self.config.get("dictation_provider", "local"),
+                    "app": self.target_app,
+                    "recording_seconds": round(seconds, 2),
+                    "first_text_ms": round((self.first_text_at - self.started_at) * 1000) if self.first_text_at else None,
+                    "first_written_ms": round((self.first_written_at - self.started_at) * 1000) if self.first_written_at else None,
+                    "live_updates": self.live_updates, "live_rewrites": self.live_rewrites,
+                    "insertion": "not_attempted", "failure_stage": stage,
+                    "error": type(exc).__name__,
+                }))
                 self.events.put(("error", str(exc)))
                 self.events.put(("result", (None, None, None)))
         threading.Thread(target=worker, daemon=True, name="saystride-dictation").start()
@@ -825,22 +910,42 @@ class App:
         if raw is None:
             return
         wait_for_modifiers()
+        insertion = "live_replaced" if self.live_text else "typed"
         if self.live_text:
             append_mode = getattr(self, "live_append_mode", False)
             pasted = (replace_append_live(self.target, self.live_text, final)
                       if append_mode else replace_live(self.target, self.live_text, final))
             if not pasted:
-                self.root.clipboard_clear()
-                self.root.clipboard_append(final)
-                status = ("Live terminal text kept; cleaned final text copied to clipboard"
-                          if append_mode else
-                          "Could not replace live text; final text copied to clipboard and kept in history")
-                self.status.set(status)
+                insertion = "clipboard_fallback" if self._copy_recovery_text(final) else "insertion_failed"
+                self.status.set("Text saved to history and clipboard; live text could not be finalized"
+                                if insertion == "clipboard_fallback" else
+                                "Text saved to history; live insertion and clipboard recovery failed")
         else:
             prefix = " " if self.before and self.before[-1:].isalnum() and final[:1].isalnum() else ""
             pasted = paste(prefix + final, self.target)
             if not pasted:
-                self.status.set("Focus changed or paste was blocked; text kept in history")
+                insertion = "clipboard_fallback" if self._copy_recovery_text(final) else "insertion_failed"
+                self.status.set("Text saved to history and clipboard; insertion was blocked"
+                                if insertion == "clipboard_fallback" else
+                                "Text saved to history; insertion and clipboard recovery failed")
+        metrics = meta[2] if len(meta) > 2 else {}
+        try:
+            self.store.record_diagnostic({
+                "provider": metrics.get("provider", "local"),
+                "requested_provider": self.config.get("dictation_provider", "local"),
+                "app": self.target_app,
+                "recording_seconds": round(meta[0], 2),
+                "first_text_ms": metrics.get("first_text_ms"),
+                "first_written_ms": metrics.get("first_written_ms"),
+                "asr_after_stop_ms": metrics.get("asr_after_stop_ms"),
+                "final_after_stop_ms": metrics.get("final_after_stop_ms"),
+                "live_updates": metrics.get("live_updates", 0),
+                "live_rewrites": metrics.get("live_rewrites", 0),
+                "insertion": insertion,
+                "error": None if pasted else "insertion_failed",
+            })
+        except OSError:
+            LOG.warning("Could not save dictation diagnostic", exc_info=True)
         self.store.remember(raw=raw, text=final, tone=self.tone, app=self.target_app,
                             seconds=meta[0], clip=meta[1], metrics=meta[2] if len(meta) > 2 else None,
                             paste_sent=pasted)
@@ -849,7 +954,18 @@ class App:
             peak = meta[2].get("peak") if len(meta) > 2 else None
             mic_note = " · microphone very quiet" if peak is not None and peak < .02 else (
                 " · microphone clipped" if peak is not None and peak >= .98 else "")
+        if pasted:
             self.status.set(f"Pasted {len(final.split())} words · {meta[0]:.1f} s{mic_note}")
+
+    def _copy_recovery_text(self, text):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self.root.update_idletasks()
+        except tk.TclError:
+            LOG.warning("Could not copy recovery text to clipboard", exc_info=True)
+            return False
+        return True
 
     def _quit(self):
         self.live_stop.set()

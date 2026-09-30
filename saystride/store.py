@@ -9,6 +9,10 @@ from uuid import uuid4
 from .config import APP_DIR, MEETINGS_DIR, save
 from .rules import learn_names, learn_signals, merge_dictionary
 
+DIAGNOSTIC_FIELDS = {"id", "date", "provider", "requested_provider", "app", "recording_seconds",
+                     "first_text_ms", "first_written_ms", "asr_after_stop_ms", "final_after_stop_ms",
+                     "live_updates", "live_rewrites", "insertion", "failure_stage", "error"}
+
 
 def _write(path: Path, value) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -25,6 +29,31 @@ class Store:
             self.history = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             self.history = []
+
+    def record_diagnostic(self, event: dict) -> None:
+        """Keep bounded, transcript-free metadata for support and reliability work."""
+        item = {"id": str(uuid4()), "date": datetime.now().astimezone().isoformat()}
+        item.update({key: event[key] for key in DIAGNOSTIC_FIELDS if key in event})
+        path = APP_DIR / "dictation_diagnostics.json"
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(rows, list):
+                rows = []
+        except (OSError, ValueError):
+            rows = []
+        rows.insert(0, item)
+        _write(path, rows[:100])
+
+    def diagnostics(self, limit: int = 20) -> list[dict]:
+        """Read recent allowlisted diagnostic metadata for the in-app viewer."""
+        try:
+            rows = json.loads((APP_DIR / "dictation_diagnostics.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(rows, list):
+            return []
+        return [{key: value for key, value in row.items() if key in DIAGNOSTIC_FIELDS}
+                for row in rows if isinstance(row, dict)][:max(0, min(limit, 100))]
 
     def remember(self, *, raw: str, text: str, tone: str, app: str, seconds: float,
                  clip: str | None = None, metrics: dict | None = None, paste_sent: bool | None = None) -> dict:

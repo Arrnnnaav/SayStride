@@ -42,13 +42,19 @@ class LiveSpeechTest(unittest.TestCase):
     def test_failed_live_replacement_does_not_append_duplicate(self):
         app = SimpleNamespace(state="processing", pill=Mock(), live_text="rough words", target=1,
                               root=Mock(), status=Mock(), store=Mock(), tone="casual", target_app="Notepad.exe",
-                              _refresh_history=Mock())
+                              config={"dictation_provider": "local"}, _refresh_history=Mock())
+        app._copy_recovery_text = lambda text: (app.root.clipboard_append(text), True)[1]
         with patch("saystride.app.wait_for_modifiers"), \
              patch("saystride.app.replace_live", return_value=False), \
              patch("saystride.app.paste") as paste:
             App._result(app, "rough words", "clean words", (2.0, None))
         paste.assert_not_called()
         app.root.clipboard_append.assert_called_once_with("clean words")
+        app.store.record_diagnostic.assert_called_once()
+        diagnostic = app.store.record_diagnostic.call_args.args[0]
+        self.assertEqual(diagnostic["insertion"], "clipboard_fallback")
+        self.assertEqual(diagnostic["error"], "insertion_failed")
+        self.assertNotIn("Pasted", app.status.set.call_args.args[0])
 
     def test_stop_during_decode_does_not_write_live_text(self):
         stop = threading.Event()
@@ -90,6 +96,7 @@ class LiveSpeechTest(unittest.TestCase):
         app = SimpleNamespace(state="processing", pill=Mock(), live_text="typed words ",
                               live_append_mode=True, target=1, root=Mock(), status=Mock(),
                               store=Mock(), tone="casual", target_app="WindowsTerminal.exe",
+                              config={"dictation_provider": "local"},
                               _refresh_history=Mock())
         with patch("saystride.app.wait_for_modifiers"), \
              patch("saystride.app.replace_append_live", return_value=True) as replace:
