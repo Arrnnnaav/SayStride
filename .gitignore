@@ -2,6 +2,7 @@
 .buildvenv/
 build/
 dist*/
+release/
 __pycache__/
 *.py[cod]
 *.spec

@@ -6,7 +6,7 @@ SayStride is a Windows desktop dictation app that types into the focused app. It
 
 - **F8:** hold to dictate; release to finish.
 - **F9:** start hands-free dictation; press **Esc** to finish.
-- Types live text into Word, Notepad, browsers, terminals, and most Windows apps.
+- Types live text into Word, Notepad, browsers, and supported fields. Terminals and VS Code use safer append or final paste paths by default.
 - Uses direct terminal insertion with append and revision handling for PowerShell, Command Prompt, and Windows Terminal.
 - Keeps local dictation history, dictionary replacements, tones, and memory.
 - Formats spoken sequences such as “first”, “second”, and “third” as numbered lists during final cleanup.
@@ -14,7 +14,7 @@ SayStride is a Windows desktop dictation app that types into the focused app. It
 ## Requirements
 
 - Windows 10 or 11
-- Python 3.11 or newer
+- Python 3.11 or newer when running from source; the installer includes the runtime
 - A working microphone
 
 Optional: an NVIDIA GPU can improve local model speed.
@@ -28,7 +28,7 @@ cd SayStride
 .\start.ps1
 ```
 
-On first launch, open **Models** and download a Parakeet speech model. SayStride then runs local dictation without sending audio to a cloud service.
+On first launch, SayStride checks the microphone and automatically downloads and verifies Parakeet v2 if it is missing. The Models page shows progress and offers retry. Local dictation then runs without sending microphone audio to a cloud service. Qwen cleanup remains an optional, larger download.
 
 ## Dictation controls
 
@@ -56,7 +56,7 @@ Local Parakeet is the default. Audio stays on the computer. It requires the down
 
 ### Deepgram
 
-Deepgram provides lower latency cloud transcription. Create a `.env` file beside this README:
+Deepgram provides optional cloud transcription. For an installed app, create `%APPDATA%\SayStride\.env`; for a source checkout, create `.env` beside this README:
 
 ```dotenv
 DEEPGRAM_API_KEY=your_key_here
@@ -77,7 +77,7 @@ To enable Quality mode, download the Qwen model from **Models**. The optional ll
 
 ## Build and install
 
-Build a distributable Windows app:
+Build a distributable Windows app from source:
 
 ```powershell
 .\build.ps1 -OutputDir dist-final
@@ -95,6 +95,16 @@ Start SayStride when you sign in:
 .\install.ps1 -Startup
 ```
 
+To create a normal per-user installer with Start Menu shortcuts and an uninstaller, install Inno Setup 6 and run:
+
+```powershell
+.\make-installer.ps1 -Version 0.1.0
+```
+
+The result is `release\SayStride-Setup-0.1.0.exe`. It installs without requiring Python or administrator rights and launches SayStride, which sets up Parakeet on first run with an internet connection. App data and models live in `%APPDATA%\SayStride`, outside the install folder. The installer does not contain downloaded models, optional Qwen or llama.cpp, API keys, or the developer's `data-dir.txt`.
+
+The GitHub Actions **Windows build** workflow creates an installer artifact on manual runs. A `vX.Y.Z` tag publishes that installer in this repository's Releases.
+
 ## Tests and benchmarks
 
 Run the test suite:
@@ -102,6 +112,8 @@ Run the test suite:
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 ```
+
+See [WINDOWS_TRIAL.md](WINDOWS_TRIAL.md) for the second-laptop trial, latency, reliability, resource, and privacy measurements.
 
 Compare providers with the same audio clips:
 

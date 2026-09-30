@@ -11,6 +11,15 @@ from saystride.app import App
 
 
 class LiveSpeechTest(unittest.TestCase):
+    def test_missing_parakeet_starts_automatic_setup(self):
+        page = object()
+        app = SimpleNamespace(config={"asr_backend": "parakeet", "asr_version": "v2"},
+                              root=Mock(), tabs=Mock(), models_page=page, _download=Mock())
+        with patch("saystride.app.parakeet_ready", return_value=False):
+            App._setup_local_speech(app)
+        app.tabs.select.assert_called_once_with(page)
+        app._download.assert_called_once_with("parakeet-v2")
+
     def test_final_recognizes_entire_recording_after_live_chunks(self):
         audio = np.ones(12 * 16000, dtype=np.float32) * .1
         seen = []

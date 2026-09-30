@@ -22,7 +22,7 @@ from PIL import Image, ImageDraw
 from .config import APP_DIR, CLIPS_DIR, MODELS_DIR, deepgram_key, load, save
 from .deepgram import DeepgramStream
 from .meetings import MeetingSession, detected_call
-from .models import Polisher, Speech, download_model, wav_bytes
+from .models import Polisher, Speech, download_model, parakeet_ready, wav_bytes
 from .store import Store
 from .windows import (Hotkey, Recorder, field_context, foreground, modifiers_down, paste,
                       replace_append_live, replace_live, revise_append_live, wait_for_modifiers)
@@ -96,6 +96,8 @@ class App:
         threading.Thread(target=self._warm_model, daemon=True, name="saystride-model").start()
         threading.Thread(target=self._warm_speech, daemon=True, name="saystride-speech").start()
         self.root.after(50, self._poll)
+        self.root.after(300, self._setup_local_speech)
+        threading.Thread(target=self._check_microphone, daemon=True, name="saystride-microphone-check").start()
         self.root.after(10000, self._offer_call)
         if not self.config["window_at_launch"]:
             self.root.withdraw()
@@ -119,6 +121,19 @@ class App:
                 self.speech._load_whisper()
         except Exception as exc:
             LOG.warning("Local speech model could not warm: %s", exc)
+
+    def _setup_local_speech(self):
+        if self.config["asr_backend"] == "parakeet" and not parakeet_ready(self.config["asr_version"]):
+            self.root.deiconify()
+            self.tabs.select(self.models_page)
+            self._download(f"parakeet-{self.config['asr_version']}")
+
+    def _check_microphone(self):
+        try:
+            sd.query_devices(self.config.get("microphone"), "input")
+            self.events.put(("mic_check", "Microphone detected"))
+        except (sd.PortAudioError, ValueError) as exc:
+            self.events.put(("mic_check", f"Microphone unavailable: {type(exc).__name__}. Select a microphone in Settings."))
 
     def _build(self):
         top = ttk.Frame(self.root, padding=12)
@@ -316,6 +331,7 @@ class App:
 
     def _models(self, tabs):
         page = ttk.Frame(tabs, padding=10)
+        self.models_page = page
         tabs.add(page, text="Models")
         self.models_status = tk.StringVar()
         self.models_hint = tk.StringVar()
@@ -342,14 +358,13 @@ class App:
         ttk.Button(page, text="Use existing GGUF file", command=self._choose_model).pack(anchor="w", pady=8)
         ttk.Button(page, text="Choose llama-server.exe", command=self._choose_llama).pack(anchor="w", pady=4)
         ttk.Button(page, text="Open models folder", command=lambda: __import__("os").startfile(MODELS_DIR)).pack(anchor="w", pady=4)
-        ttk.Label(page, text="Speech falls back to local faster-whisper if Parakeet is missing. "
-                        "Cleanup uses llama-server with GGUF, or local Ollama if configured.", wraplength=800).pack(anchor="w", pady=12)
+        ttk.Label(page, text="Parakeet installs automatically for local dictation. "
+                        "Qwen cleanup is optional and needs more disk space and memory.", wraplength=800).pack(anchor="w", pady=12)
 
     def _refresh_models(self):
         models = ", ".join(x.name for x in MODELS_DIR.glob("*.gguf")) or "none"
         parakeet = ", ".join(x.name for x in MODELS_DIR.glob("sherpa-onnx-*") if x.is_dir()) or "none"
-        speech_ready = any((x / "tokens.txt").exists() and (x / "encoder.int8.onnx").exists()
-                           for x in MODELS_DIR.glob("sherpa-onnx-*") if x.is_dir())
+        speech_ready = parakeet_ready(self.config["asr_version"])
         cleanup_ready = (self.config.get("cleanup_mode", "fast") == "fast" or
                          bool(models != "none" and Path(self.polisher._server_path()).exists()))
         ready = speech_ready and cleanup_ready
@@ -358,7 +373,7 @@ class App:
                                f"LLM: {self.config['llm_backend']} / {self.config['ollama_model']}")
         self.models_hint.set("Hold F8 to dictate live, or press F9 once and press Esc to stop. "
                              + ("Everything needed is installed." if ready else
-                                "Download the missing model above, then try a short dictation."))
+                                "Local speech sets up automatically on launch. Retry the download above if needed."))
         if hasattr(self, "download_buttons"):
             for kind, button in self.download_buttons.items():
                 button.configure(state="disabled" if self.download_active else "normal")
@@ -367,9 +382,9 @@ class App:
         if self.download_active:
             return
         self.download_active = kind
-        self.models_status.set(f"Downloading {kind}…")
-        self.models_hint.set("You can keep using the window. This download can take a while and resumes if interrupted.")
         self._refresh_models()
+        self.models_status.set(f"Downloading {kind}…")
+        self.models_hint.set("Setup is automatic. This download resumes if interrupted.")
         def worker():
             try:
                 path = download_model(kind, lambda done, total: self.events.put(("download_progress", (kind, done, total))))
@@ -474,6 +489,8 @@ class App:
     def _settings(self, tabs):
         page = ttk.Frame(tabs, padding=10)
         tabs.add(page, text="Settings")
+        self.mic_status = tk.StringVar(value="Checking microphone…")
+        ttk.Label(page, textvariable=self.mic_status).pack(anchor="w", pady=(0, 6))
         diagnostics_row = ttk.Frame(page)
         diagnostics_row.pack(fill="x", pady=(0, 6))
         ttk.Label(diagnostics_row, text="Troubleshooting").pack(side="left")
@@ -638,6 +655,7 @@ class App:
                     except OSError:
                         LOG.warning("Could not save dictation diagnostic", exc_info=True)
                 elif kind == "hotkey_error": self.status.set(value)
+                elif kind == "mic_check": self.mic_status.set(value)
                 elif kind == "context":
                     target, before, after = value
                     if self.state in {"recording", "stop_on_release"} and target == self.target:
@@ -647,13 +665,14 @@ class App:
                     self.models_status.set(f"{name}: {done / 1e6:.0f} / {total / 1e6:.0f} MB" if total else f"{name}: {done / 1e6:.0f} MB")
                 elif kind == "download_done":
                     self.download_active = None
-                    self.status.set(f"Downloaded {value}")
                     self._refresh_models()
+                    self.status.set("Local speech is ready")
+                    threading.Thread(target=self._warm_speech, daemon=True, name="saystride-speech-ready").start()
                 elif kind == "download_error":
                     self.download_active = None
-                    self.status.set(value)
-                    self.models_hint.set("Download failed. Check your connection and try again; partial downloads can resume.")
                     self._refresh_models()
+                    self.status.set(value)
+                    self.models_hint.set("Download failed. Check your connection and retry; partial downloads can resume.")
                 elif kind == "meeting": self._refresh_meetings()
                 elif kind == "meeting_stopped": self.meeting_button.configure(text="Start meeting notes")
                 elif kind == "toggle_meeting": self._toggle_meeting()
@@ -667,6 +686,12 @@ class App:
 
     def _down(self, mode):
         if self.state != "idle":
+            return
+        if (self.config["dictation_provider"] == "local" and self.config["asr_backend"] == "parakeet"
+                and not parakeet_ready(self.config["asr_version"])):
+            self.status.set("Local speech is still being set up. Check the Models page.")
+            self.root.deiconify()
+            self.tabs.select(self.models_page)
             return
         self.record_mode = mode
         self.target, self.target_title, self.target_app = foreground()
@@ -928,6 +953,7 @@ class App:
                 self.status.set("Text saved to history and clipboard; insertion was blocked"
                                 if insertion == "clipboard_fallback" else
                                 "Text saved to history; insertion and clipboard recovery failed")
+        delivered_at = time.monotonic()
         metrics = meta[2] if len(meta) > 2 else {}
         try:
             self.store.record_diagnostic({
@@ -939,6 +965,10 @@ class App:
                 "first_written_ms": metrics.get("first_written_ms"),
                 "asr_after_stop_ms": metrics.get("asr_after_stop_ms"),
                 "final_after_stop_ms": metrics.get("final_after_stop_ms"),
+                "final_delivery_ms": round((delivered_at - self.stopped_at) * 1000)
+                                     if getattr(self, "stopped_at", 0) else None,
+                "total_ms": round((delivered_at - self.started_at) * 1000)
+                            if getattr(self, "started_at", 0) else None,
                 "live_updates": metrics.get("live_updates", 0),
                 "live_rewrites": metrics.get("live_rewrites", 0),
                 "insertion": insertion,

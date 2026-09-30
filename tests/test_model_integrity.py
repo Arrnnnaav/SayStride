@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from saystride.models import download_model
+from saystride.models import download_model, parakeet_ready, PARAKEET
 
 
 class DownloadResponse:
@@ -28,6 +28,16 @@ class DownloadResponse:
 
 
 class ModelIntegrityTest(unittest.TestCase):
+    def test_incomplete_parakeet_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as temporary, patch("saystride.models.MODELS_DIR", Path(temporary)):
+            folder = Path(temporary) / PARAKEET.format(version="v2")
+            folder.mkdir()
+            (folder / "tokens.txt").write_text("tokens", encoding="utf-8")
+            self.assertFalse(parakeet_ready("v2"))
+            for name in ("encoder", "decoder", "joiner"):
+                (folder / f"{name}.int8.onnx").write_bytes(b"model")
+            self.assertTrue(parakeet_ready("v2"))
+
     def test_corrupt_and_existing_model_are_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             expected = hashlib.sha256(b"valid model").hexdigest()

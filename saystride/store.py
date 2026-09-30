@@ -11,7 +11,8 @@ from .rules import learn_names, learn_signals, merge_dictionary
 
 DIAGNOSTIC_FIELDS = {"id", "date", "provider", "requested_provider", "app", "recording_seconds",
                      "first_text_ms", "first_written_ms", "asr_after_stop_ms", "final_after_stop_ms",
-                     "live_updates", "live_rewrites", "insertion", "failure_stage", "error"}
+                     "final_delivery_ms", "total_ms", "live_updates", "live_rewrites", "insertion",
+                     "failure_stage", "error"}
 
 
 def _write(path: Path, value) -> None:

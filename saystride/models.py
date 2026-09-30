@@ -33,6 +33,13 @@ MODEL_SHA256 = {
 }
 
 
+def parakeet_ready(version: str) -> bool:
+    model = MODELS_DIR / PARAKEET.format(version=version)
+    files = [model / f"{name}.int8.onnx" for name in ("encoder", "decoder", "joiner")]
+    files.append(model / "tokens.txt")
+    return all(path.is_file() and path.stat().st_size > 0 for path in files)
+
+
 def wav_bytes(samples: np.ndarray, rate: int = 16000) -> bytes:
     pcm = (np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes()
     buffer = io.BytesIO()
@@ -45,7 +52,7 @@ def wav_bytes(samples: np.ndarray, rate: int = 16000) -> bytes:
 
 
 def download_model(kind: str, progress=lambda *_: None) -> Path:
-    """Explicit download action from the Models page; never fetch gigabytes on app startup."""
+    """Download an optional model or the first-run Parakeet model."""
     if kind == "qwen":
         target = MODELS_DIR / "Qwen3.5-4B-Q4_K_M.gguf"
         url = QWEN_URL
@@ -61,7 +68,7 @@ def download_model(kind: str, progress=lambda *_: None) -> Path:
             if hashlib.file_digest(file, "sha256").hexdigest() != MODEL_SHA256[kind]:
                 raise ValueError("Existing Qwen model does not match the official download")
         return target
-    if kind != "qwen" and (MODELS_DIR / name / "tokens.txt").exists():
+    if kind != "qwen" and parakeet_ready(kind[-2:]):
         return MODELS_DIR / name
     temp = target.with_suffix(target.suffix + ".part")
     # Resume partial downloads. The server must honor the Range request before append.
@@ -112,7 +119,7 @@ class Speech:
             import sherpa_onnx
             model = MODELS_DIR / PARAKEET.format(version=version)
             paths = {key: model / f"{key}.int8.onnx" for key in ("encoder", "decoder", "joiner")}
-            if not all(x.exists() for x in paths.values()) or not (model / "tokens.txt").exists():
+            if not parakeet_ready(version):
                 raise FileNotFoundError(f"Parakeet {version} is not installed. Download it on the Models page.")
             self._parakeet = sherpa_onnx.OfflineRecognizer.from_transducer(
                 **{k: str(v) for k, v in paths.items()}, tokens=str(model / "tokens.txt"),

@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import statistics
 import time
 from datetime import datetime, timezone
@@ -22,6 +23,25 @@ def median(values):
     return round(statistics.median(values)) if values else None
 
 
+def p95(values):
+    return sorted(values)[max(0, math.ceil(.95 * len(values)) - 1)] if values else None
+
+
+def term_counts(reference: str, transcript: str, terms: list[str]) -> tuple[int, int]:
+    expected = heard = 0
+    original, result = words(reference), words(transcript)
+    for term in terms:
+        tokens = words(term)
+        if not tokens:
+            continue
+        count = lambda source: sum(source[i:i + len(tokens)] == tokens
+                                   for i in range(len(source) - len(tokens) + 1))
+        needed = count(original)
+        expected += needed
+        heard += min(needed, count(result))
+    return heard, expected
+
+
 def score(report: dict, history: list[dict]) -> None:
     references = {item["id"]: item.get("reference_raw") for item in history}
     labeled = []
@@ -32,6 +52,7 @@ def score(report: dict, history: list[dict]) -> None:
         if reference:
             labeled.append((row, len(words(reference))))
     summary = report["summary"]
+    terms = report.get("terms", [])
     summary["labeled_clips"] = len(labeled)
     for model in ("local", "deepgram"):
         field = f"{model}_corpus_wer"
@@ -41,6 +62,13 @@ def score(report: dict, history: list[dict]) -> None:
                                        for row, length in labeled) / total_words, 4)
         else:
             summary.pop(field, None)
+        term_hits = term_total = 0
+        for row, _ in labeled:
+            hits, total = term_counts(references[row["history_id"]], row[f"{model}_text"], terms)
+            term_hits += hits
+            term_total += total
+        summary[f"{model}_term_recall"] = round(term_hits / term_total, 4) if term_total else None
+    summary["expected_term_mentions"] = term_total
 
 
 def main() -> int:
@@ -48,14 +76,19 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="newest N usable clips; default all")
     parser.add_argument("--score-existing", action="store_true", help="score saved transcripts after labeling; no API calls")
     parser.add_argument("--output", default="", help="report path; defaults to the app data folder")
+    parser.add_argument("--terms", type=Path, help="one technical term or proper name per line")
     args = parser.parse_args()
     config = load()
     history = Store(config).history
     path = APP_DIR / "asr_benchmark.json"
     if args.output:
         path = Path(args.output).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
     if args.score_existing:
         report = json.loads(path.read_text(encoding="utf-8"))
+        if args.terms:
+            report["terms"] = [line.strip() for line in args.terms.read_text(encoding="utf-8").splitlines()
+                               if line.strip() and not line.lstrip().startswith("#")]
         score(report, history)
         path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
         print(json.dumps(report["summary"], indent=2))
@@ -96,6 +129,8 @@ def main() -> int:
             "history_id": item["id"], "clip": item["clip"], "audio_seconds": round(len(audio) / rate, 3),
             "audio_sha256": hashlib.sha256((CLIPS_DIR / item["clip"]).read_bytes()).hexdigest(),
             "local_ms": local_ms, "deepgram_ms": deepgram_ms,
+            "local_rtf": round(local_ms / (len(audio) / rate * 1000), 3),
+            "deepgram_rtf": round(deepgram_ms / (len(audio) / rate * 1000), 3),
             "local_text": local_text, "deepgram_text": deepgram_text,
             "disagreement_wer": round(word_error_rate(local_text, deepgram_text), 4),
             "local_wer": round(word_error_rate(reference, local_text), 4) if reference else None,
@@ -109,16 +144,22 @@ def main() -> int:
     summary = {
         "clips": len(results), "audio_seconds": round(sum(r["audio_seconds"] for r in results), 1),
         "local_median_ms": median([r["local_ms"] for r in results]),
+        "local_p95_ms": p95([r["local_ms"] for r in results]),
         "deepgram_median_ms": median([r["deepgram_ms"] for r in results]),
+        "deepgram_p95_ms": p95([r["deepgram_ms"] for r in results]),
+        "local_median_rtf": round(statistics.median(r["local_rtf"] for r in results), 3),
+        "deepgram_median_rtf": round(statistics.median(r["deepgram_rtf"] for r in results), 3),
         "local_total_ms": sum(r["local_ms"] for r in results),
         "deepgram_total_ms": sum(r["deepgram_ms"] for r in results),
         "median_disagreement_wer": round(statistics.median(r["disagreement_wer"] for r in results), 4),
         "labeled_clips": sum(r["local_wer"] is not None for r in results),
     }
+    terms = ([line.strip() for line in args.terms.read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.lstrip().startswith("#")] if args.terms else [])
     report = {"run_utc": datetime.now(timezone.utc).isoformat(), "clip_order": "date,id ascending",
               "local_model": f"parakeet-{config['asr_version']}",
               "deepgram_model": config["deepgram_model"], "keyterms": config["deepgram_keyterms"],
-              "summary": summary, "clips": results}
+              "terms": terms, "summary": summary, "clips": results}
     score(report, history)
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, indent=2))

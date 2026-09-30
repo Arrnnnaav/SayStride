@@ -37,7 +37,7 @@ DEFAULT = {
     "dictionary": ["SayStride: say stride, say stryde"],
     "learned_signals": [],
     "memory": "",
-    "keep_clips": True,
+    "keep_clips": False,
     "overlay": True,
     "sounds": True,
     "field_context": True,
